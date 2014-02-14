@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 import glob
+import time
 
 # create video capture
 cap = cv2.VideoCapture(0)
@@ -14,20 +15,6 @@ SIFT = False
 ORB = True
 
 real_width = 30
-#load fiducials
-fids = glob.glob('fiducials/*.png')
-tags = []
-count = 0
-for fid in fids:
-    tags.append({
-        'img' : cv2.imread(fid,0),
-        'id' : count,
-        'file' : fid,
-        })
-     
-    count +=1 
-# h and w of fiducial
-h,w = tags[0]['img'].shape
 
 #braille pin spacing and positioning wrt top left corner of fiducial
 x_pitch = 2.5
@@ -56,100 +43,110 @@ try:
 except IOError as e:
     print("couldn't open camera file, not undistorting...")
 
-if ORB:
-    MIN_MATCH_COUNT = 80
-    # Initiate ORB detector
-    print("using ORB")
-    orb = cv2.ORB()
-elif SIFT:
-    MIN_MATCH_COUNT = 8
-    # Initiate SIFT detector
-    print("using SIFT")
-    sift = cv2.SIFT()
+FLANN_INDEX_KDTREE = 1  # bug: flann enums are missing
+FLANN_INDEX_LSH    = 6
+def init_feature(name):
+    if name == 'sift':
+        detector = cv2.SIFT()
+        norm = cv2.NORM_L2
+    elif name == 'surf':
+        detector = cv2.SURF(800)
+        norm = cv2.NORM_L2
+    elif name == 'orb':
+        detector = cv2.ORB(400)
+        norm = cv2.NORM_HAMMING
+    elif name == 'brisk':
+        detector = cv2.BRISK()
+        norm = cv2.NORM_HAMMING
+    else:
+        return None, None
 
-#find the keypoints and descriptors with ORB
-#fiducial
-for tag in tags:
-    print("processing fid %d %s" % (tag['id'], tag['file']))
-    if ORB:
-        tag['kp'] = orb.detect(tag['img'],None)
-        tag['kp'], tag['des'] = orb.compute(tag['img'],tag['kp'])
-    elif SIFT:
-        # find the keypoints and descriptors with SIFT
-        tag['kp'],tag['des'] = sift.detectAndCompute(tag['img'],None)
+    if norm == cv2.NORM_L2:
+        flann_params = dict(algorithm = FLANN_INDEX_KDTREE, trees = 5)
+    else:
+        flann_params= dict(algorithm = FLANN_INDEX_LSH,
+                           table_number = 6, # 12
+                           key_size = 12,     # 20
+                           multi_probe_level = 1) #2
+    matcher = cv2.FlannBasedMatcher(flann_params, {})  # bug : need to pass empty dict (#1329)
+    return detector, matcher
 
-def compute_image(img):
-#    print("processing image")
-    if ORB:
-        #photo
-        img_kp = orb.detect(img,None)
-        img_kp, img_des = orb.compute(img,img_kp)
-    elif SIFT:
-        #photo
-        img_kp, img_des = sift.detectAndCompute(img,None)
-        #print img_kp
-        #print img_des
+
+#load fiducials
+def init_fiducials(detector):
+    fids = glob.glob('fiducials/*.png')
+    tags = []
+    for fid in fids:
+        print("processing fid %d %s" % (len(tags), fid))
+        tag = {
+            'img' : cv2.imread(fid,0),
+            'id' : len(tags),
+            'file' : fid,
+            }
+         
+        # h and w of fiducial
+        tag['h'],tag['w'] = tag['img'].shape
+
+        tag['kp'], tag['des'] = detector.detectAndCompute(tag['img'],None)
+        tag['numkp'] = len(tag['kp'])
+        tags.append(tag)
+    return tags
+
+def compute_image(img,detector):
+    img_kp, img_des = detector.detectAndCompute(img,None)
     return(img_des,img_kp)
 
-print("done")
+def filter_matches(kp1, kp2, matches, ratio = 0.75):
+    mkp1, mkp2 = [], []
+    for m in matches:
+        if len(m) == 2 and m[0].distance < m[1].distance * ratio:
+            m = m[0]
+            mkp1.append( kp1[m.queryIdx] )
+            mkp2.append( kp2[m.trainIdx] )
+    p1 = np.float32([kp.pt for kp in mkp1])
+    p2 = np.float32([kp.pt for kp in mkp2])
+    kp_pairs = zip(mkp1, mkp2)
+    return p1, p2, kp_pairs
+
 #does the match, if it's good returns the homography transform
-def find(des,kp,img_des,img_kp):
-    if ORB:
-        # create BFMatcher object
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        # Match descriptors.
-        matches = bf.match(des,img_des)
-        # Sort them in the order of their distance.
-        matches = sorted(matches, key = lambda x:x.distance)[:MIN_MATCH_COUNT]
-    elif SIFT:
-        FLANN_INDEX_KDTREE = 0
-        index_params = dict(algorithm = FLANN_INDEX_KDTREE, trees = 5)
-        search_params = dict(checks = 50)
-        flann = cv2.FlannBasedMatcher(index_params, search_params)
-        matches = flann.knnMatch(des,img_des,k=2)
-        good = []
-        for m,n in matches:
-            if m.distance < 0.7*n.distance:
-                good.append(m)
-        matches = good
-
-
-#    print "matches are found - %d/%d" % (len(matches),MIN_MATCH_COUNT)
-    
-    if len(matches)>=MIN_MATCH_COUNT:
-        src_pts = np.float32([ kp[m.queryIdx].pt for m in matches ]).reshape(-1,1,2)
-        dst_pts = np.float32([ img_kp[m.trainIdx].pt for m in matches ]).reshape(-1,1,2)
-
-        #get the transformation between the flat fiducial and the found fiducial in the photo
-        M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC,5.0)
-
-        #return the transform
-        return( M,len(matches))
+def find(matcher,desc1,desc2,kp1,kp2):
+    raw_matches = matcher.knnMatch(desc1, trainDescriptors = desc2, k = 2) #2
+    p1, p2, kp_pairs = filter_matches(kp1, kp2, raw_matches)
+    if len(p1) >= 4:
+        H, status = cv2.findHomography(p1, p2, cv2.RANSAC, 5.0)
+    #    print '%d / %d  inliers/matched' % (np.sum(status), len(status))
+        num = len(status)
     else:
-#        print "Not enough matches are found - %d/%d" % (len(matches),MIN_MATCH_COUNT)
-        return (None,len(matches))
+        H, status = None, None
+    #    print '%d matches found, not enough for homography estimation' % len(p1)
+        num = len(p1)
+
+    return( H, num)
 
 #draws boxes round the important things: fiducial, pins
-def draw_outlines(M,img):
+def draw_outlines(H,img,tag):
     #array containing co-ords of the fiducial
-    pts = np.float32([ [0,0],[0,h-1],[w-1,h-1],[w-1,0] ]).reshape(-1,1,2)
+    pts = np.float32([ [0,0],[0,tag['h']-1],[tag['w']-1,tag['h']-1],[tag['w']-1,0] ]).reshape(-1,1,2)
     #transform the coords of the fiducial onto the picture
-    dst = cv2.perspectiveTransform(pts,M)
+    dst = cv2.perspectiveTransform(pts,H)
     #draw a box around the fiducial
     cv2.polylines(img,[np.int32(dst)],True,(255,0,0),5, cv2.CV_AA)
 
     #repeat for the pins
+    """
     pts=np.float32([
         [mm2px(pin_x),mm2px(pin_y)],
         [mm2px(pin_x+2*x_pitch),mm2px(pin_y)],
         [mm2px(pin_x+2*x_pitch),mm2px(pin_y+3*y_pitch)],
         [mm2px(pin_x),mm2px(pin_y+3*y_pitch)],
         ]).reshape(-1,1,2)
-    dst = cv2.perspectiveTransform(pts,M)
+    dst = cv2.perspectiveTransform(pts,H)
     cv2.polylines(img,[np.int32(dst)],True,(0,255,0),5, cv2.CV_AA)
+    """
 
+"""
 #find the shadows of the pins!
-def detect_shadows(M):
+def detect_shadows(H):
     pin_num = 0
     #for each shadow: pins are numbered 0 to 2 in the left column, 3 to 5 in the right
     for x in range(2):
@@ -187,31 +184,29 @@ def detect_shadows(M):
     #roidst = cv2.perspectiveTransform(roipts,M)
     #cv2.polylines(img,[np.int32(roidst)],True,(255,0,0),3, cv2.CV_AA)
     #cv2.line(img,tuple(roidst[0][0]),tuple(roidst[1][0]),(255,0,0),3)
+"""
 
+if __name__ == '__main__':
+    #find the fiducial
+    detector = 'orb'
+    print( "starting, using %s", detector)
+    detector, matcher = init_feature(detector)
+    tags = init_fiducials(detector)
+    for tag in tags:
+        print( "tag %d, file %s, kps %d" % (tag['id'],tag['file'],tag['numkp']))
 
-#find the fiducial
-print( "loop...")
-while True:
-    success,frame = cap.read()
-    if success:
-        (img_des,img_kp) = compute_image(frame)
-        if len(img_kp):
-
+    while True:
+        success,frame = cap.read()
+        if success:
+            (img_des,img_kp) = compute_image(frame,detector)
             for tag in tags:
-                (M,matches) = find(tag['des'],tag['kp'],img_des,img_kp)
-                if M != None:
-                    print("tag %d : %d" %( tag['id'],matches))
-                    #detect_shadows(M)
-                    draw_outlines(M,frame)
-                    """
-                    #write out full size image
-                    cv2.imwrite('found.png', img)
-                    """
-                    #resize for display
-    #                newx,newy = img.shape[1]/4,img.shape[0]/4 #new size (w,h)
-    #                smallimg = cv2.resize(img,(newx,newy))
+                (H,matches) = find(matcher,tag['des'],img_des,tag['kp'],img_kp)
 
-        cv2.imshow('found',frame)
-        if cv2.waitKey(33)== 27:
-            break
-            break
+                print("tag %d : %d" %( tag['id'],matches))
+                if matches >= 20:
+                    draw_outlines(H,frame,tag)
+
+            cv2.imshow('found',frame)
+            if cv2.waitKey(33)== 27:
+                break
+        time.sleep(0.1)
