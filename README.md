@@ -1,5 +1,7 @@
 # QR music player
 
+![qr pic](qrpic.jpg)
+
 Based on an idea from [Dave Murray-Rust](http://www.mo-seph.com/), this is a set of small scripts that lets you get 'hands on' with your digital music collection.
 
 Print out your album art on one side and a version 1 (smallest size) QR code on the other (not yet automated).
