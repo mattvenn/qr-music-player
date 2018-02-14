@@ -44,12 +44,19 @@ See a [video demo here](http://youtu.be/DuRMDblAJZM).
 
 # Pre requisites
 
+* sudo apt-get update
+* sudo apt-get install python-pil
 * sudo apt-get install python-zbar
-* python opencv (cv2) - maybe we can avoid this?
-* python (pil) Image - can avoid this too?
-* pip install qrcode
-* mpc and mpd for music playing
+* sudo apt-get install python-opencv
+* pip install qrcode # only needed for creating qr codes
+* sudo apt-get install mpc mpd # for music playing
 
+# ws2812 status leds
+
+* https://tutorials-raspberrypi.com/connect-control-raspberry-pi-ws2812-rgb-led-strips/ 
+
+* use SPI so doesn't interfere with i2s
+* need core_freq=250 in the bootconfig for rpi3
 
 # License
 
