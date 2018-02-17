@@ -8,5 +8,6 @@ def add(album):
         print("already playing %s" % album)
     else:
         print("adding %s" % album)
-        os.system('mpc clear; mpc search any %s | mpc add; mpc play' % album)
+        print('mpc clear; mpc search any "%s" | mpc add; mpc play' % album)
+        os.system('mpc clear; mpc search any "%s" | mpc add; mpc play' % album)
 
